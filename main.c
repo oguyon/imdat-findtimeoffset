@@ -9,6 +9,33 @@
 // Macro for error handling
 #define CHECK_STATUS(status) if (status) { fits_report_error(stderr, status); exit(status); }
 
+// Function to print a progress bar to stderr
+void print_progress(const char* label, int current_step, int total_steps) {
+    if (current_step > total_steps) {
+        current_step = total_steps;
+    }
+    int bar_width = 50;
+    double progress = (total_steps > 0) ? (double)current_step / total_steps : 1.0;
+    if (progress > 1.0) progress = 1.0;
+
+    int pos = bar_width * progress;
+
+    fprintf(stderr, "%-10s [", label);
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) fprintf(stderr, "=");
+        else if (i == pos) fprintf(stderr, ">");
+        else fprintf(stderr, " ");
+    }
+    fprintf(stderr, "] %d/%d (%.1f %%)", current_step, total_steps, progress * 100.0);
+
+    if (current_step < total_steps) {
+        fprintf(stderr, "\r");
+    } else {
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
+
 typedef struct {
     double *data;     // Flattened data (n_frames x n_pixels), row-major
     double *time;     // Time stamps
@@ -431,28 +458,32 @@ int main() {
 
     // To speed up, we can trim the search range to meaningful overlaps
     // But let's stick to the full range for now.
-
+    int scan_steps = lround((max_offset - min_offset) / step) + 1;
+    int current_step = 0;
     for (double offset = min_offset; offset <= max_offset; offset += step) {
         double corr = evaluate_offset(dsA, reducedA, dsB, reducedB, K, offset);
         if (corr > max_corr) {
             max_corr = corr;
             best_offset = offset;
-            // printf("Offset: %.4f, Corr: %.4f\n", offset, corr);
         }
+        print_progress("Scanning", ++current_step, scan_steps);
     }
 
     // Refine search around best_offset
     double refined_step = step / 20.0;
     double search_width = step * 2.0;
 
-    printf("Refining search around %.4f...\n", best_offset);
+    printf("\nRefining search around %.4f...\n", best_offset);
 
+    int refine_steps = lround((2 * search_width) / refined_step) + 1;
+    current_step = 0;
     for (double offset = best_offset - search_width; offset <= best_offset + search_width; offset += refined_step) {
          double corr = evaluate_offset(dsA, reducedA, dsB, reducedB, K, offset);
          if (corr > max_corr) {
             max_corr = corr;
             best_offset = offset;
          }
+         print_progress("Refining", ++current_step, refine_steps);
     }
 
     printf("\nBest Time Offset: %.6f\n", best_offset);
