@@ -1,0 +1,8 @@
+# Build artifacts
+build/
+
+# Generated data
+dataA.fits
+dataA.txt
+dataB.fits
+dataB.txt
