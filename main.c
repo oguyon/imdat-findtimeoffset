@@ -37,6 +37,11 @@ void print_progress(const char* label, int current_step, int total_steps) {
 }
 
 typedef struct {
+    double offset;
+    double correlation;
+} CorrelationPoint;
+
+typedef struct {
     double *data;     // Flattened data (n_frames x n_pixels), row-major
     double *time;     // Time stamps
     int n_frames;
@@ -422,6 +427,65 @@ double evaluate_offset(DataSet *dsA, double *reducedA, DataSet *dsB, double *red
     return corr;
 }
 
+void print_plot(CorrelationPoint* results, int count, int width, int height) {
+    if (count == 0) return;
+
+    printf("\n\nCCA Score vs. Time Offset\n");
+
+    double min_offset = results[0].offset;
+    double max_offset = results[count - 1].offset;
+    double max_corr = 0;
+    for (int i = 0; i < count; i++) {
+        if (results[i].correlation > max_corr) {
+            max_corr = results[i].correlation;
+        }
+    }
+
+    if (max_corr == 0) max_corr = 1.0; // Avoid division by zero
+
+    char **plot = (char**) malloc(height * sizeof(char*));
+    for (int i = 0; i < height; i++) {
+        plot[i] = (char*) malloc((width + 1) * sizeof(char));
+        for (int j = 0; j < width; j++) {
+            plot[i][j] = ' ';
+        }
+        plot[i][width] = '\0';
+    }
+
+    for (int i = 0; i < count; i++) {
+        int x = (int)((results[i].offset - min_offset) / (max_offset - min_offset) * (width - 1));
+        int y = (int)(results[i].correlation / max_corr * (height - 1));
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+            plot[height - 1 - y][x] = '*';
+        }
+    }
+
+    // Print plot with axes
+    for (int i = 0; i < height; i++) {
+        printf("%.2f |", max_corr - (double)i / (height - 1) * max_corr);
+        printf("%s\n", plot[i]);
+    }
+
+    // X-axis line
+    printf("     +");
+    for (int i = 0; i < width; i++) printf("-");
+    printf("\n");
+
+    // X-axis labels
+    printf("      %.2f", min_offset);
+    char label[20];
+    sprintf(label, "%.2f", max_offset);
+    int label_len = strlen(label);
+    for (int i = 0; i < width - label_len - 8; i++) printf(" ");
+    printf("%s\n\n", label);
+
+
+    for (int i = 0; i < height; i++) {
+        free(plot[i]);
+    }
+    free(plot);
+}
+
 
 int main() {
     // Parameters
@@ -459,9 +523,17 @@ int main() {
     // To speed up, we can trim the search range to meaningful overlaps
     // But let's stick to the full range for now.
     int scan_steps = lround((max_offset - min_offset) / step) + 1;
+    CorrelationPoint *scan_results = (CorrelationPoint*) malloc(scan_steps * sizeof(CorrelationPoint));
+    int result_count = 0;
+
     int current_step = 0;
     for (double offset = min_offset; offset <= max_offset; offset += step) {
         double corr = evaluate_offset(dsA, reducedA, dsB, reducedB, K, offset);
+        if (corr >= 0 && result_count < scan_steps) {
+            scan_results[result_count].offset = offset;
+            scan_results[result_count].correlation = corr;
+            result_count++;
+        }
         if (corr > max_corr) {
             max_corr = corr;
             best_offset = offset;
@@ -489,7 +561,11 @@ int main() {
     printf("\nBest Time Offset: %.6f\n", best_offset);
     printf("Max Correlation: %.6f\n", max_corr);
 
+    // Print plot
+    print_plot(scan_results, result_count, 70, 15);
+
     // Cleanup
+    free(scan_results);
     free(reducedA);
     free(reducedB);
     free_dataset(dsA);
