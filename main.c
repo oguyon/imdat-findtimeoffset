@@ -400,20 +400,21 @@ double evaluate_offset(DataSet *dsA, double *reducedA, DataSet *dsB, double *red
     return corr;
 }
 
-void print_plot(CorrelationPoint* results, int count, int vmin, int vmax) {
+void print_plot(CorrelationPoint* results, int count, double vmin, double vmax) {
     if (count == 0) return;
 
     printf("\n\nCCA Score vs. Time Offset\n");
 
     double min_offset = results[0].offset;
-    double max_offset = results[count - 1].offset;
+    double max_offset = results[count - 2].offset;
     printf("Min/Max Time Offset: %.6f - %.6f \n", min_offset, max_offset);
 
     if (min_offset == max_offset) max_offset += 1.0; // prevent division by zero
     if (vmin == vmax) vmax = vmin + 1; // prevent division by zero
+    printf("Vmin/vmax: %.6f - %.6f \n", vmin, vmax);
 
-    int height = 15;
-    int width = 70;
+    int height = 20;
+    int width = 90;
 
     char **plot = (char**) malloc(height * sizeof(char*));
     for (int i = 0; i < height; i++) {
@@ -425,26 +426,50 @@ void print_plot(CorrelationPoint* results, int count, int vmin, int vmax) {
     for (int i = 0; i < width; i++) {
         int idx = (int)((double)i / (double)(width - 1) * (count - 1)); // map to [0, count-1]
 
-        double x_ratio = (results[idx].offset - min_offset) / (max_offset - min_offset);
-        int x = (int)(x_ratio * (width - 1));
+        double x_ratio;
+        if (results[idx].offset >= 0.0) {
+            // [0 .. max_offset] → [0 .. 1]
+            x_ratio = (max_offset > 0.0) ? results[idx].offset / max_offset : 0.0;
+        } else {
+            // [min_offset .. 0] → [-1 .. 0]
+            x_ratio = (min_offset < 0.0) ? results[idx].offset / (-min_offset) : 0.0;
+        }
 
-        double y_ratio = (results[idx].correlation - vmin) / (vmax - vmin);
-        int y = (int)(y_ratio * (height - 1));
+        // Map [-1 .. +1] → [0 .. width-1]
+        double x_norm = (x_ratio + 1.0) * 0.5;
 
-        printf("\nPoint %d/%d\n", idx, count);
-        printf("Time Offset: %.6f\n", results[idx].offset);
-        printf("Max Correlation: %.6f\n", results[idx].correlation);
-        printf("XY coordinate (%d,%d)\n", x, y);
+        // Clamp to [0, 1]
+        if (x_norm < 0.0) x_norm = 0.0;
+        if (x_norm > 1.0) x_norm = 1.0;
+        int x = (int)(x_norm * (width - 1));
 
+        double y_ratio;
+
+        if (results[idx].correlation >= 0.0) {
+            // [0 .. vmax] → [0 .. 1]
+            y_ratio = (vmax > 0.0) ? results[idx].correlation / vmax : 0.0;
+        } else {
+            // [vmin .. 0] → [-1 .. 0]
+            y_ratio = (vmin < 0.0) ? results[idx].correlation / (-vmin) : 0.0;
+        }
+
+        // Map [-1 .. +1] → [0 .. height-1]
+        double y_norm = (y_ratio + 1.0) * 0.5;
+
+        // Clamp to [0, 1]
+        if (y_norm < 0.0) y_norm = 0.0;
+        if (y_norm > 1.0) y_norm = 1.0;
+
+        int y = (int)(y_norm * (height - 1));
+        
         if (x >= 0 && x < width && y >= 0 && y < height) {
-            plot[height - 1 - y][x] = '*';
+            plot[height-y-1][x] = '*';
         }
     }
 
-    // Print plot with axes
     for (int i = 0; i < height; i++) {
-        double y_val = vmax - (double)i / (height - 1) * (vmax - vmin);
-        printf("%6.2f |%s\n", y_val, plot[i]);
+        double y_val = vmax - (vmax - vmin) * i / (height - 1);
+        printf("%7.3f |%s\n", y_val, plot[i]);
     }
 
     // X-axis line
@@ -452,25 +477,44 @@ void print_plot(CorrelationPoint* results, int count, int vmin, int vmax) {
     for (int i = 0; i < width; i++) printf("-");
     printf("\n");
 
+
     // X-axis labels
-    printf("       %.2f", min_offset);
-    char label[20];
-    sprintf(label, "%.2f", max_offset);
-    int label_len = strlen(label);
-    for (int i = 0; i < width - label_len - 7; i++) printf(" ");
+    printf(" %.2f", min_offset); 
+    char label[20]; 
+    sprintf(label, "%.2f", max_offset); 
+    int label_len = strlen(label); 
+    for (int i = 0; i < width - label_len - 8; i++) 
+    printf(" "); 
     printf("%s\n\n", label);
 
     for (int i = 0; i < height; i++) free(plot[i]);
     free(plot);
 }
 
+void print_progress(int step, int total, double offset, double corr) {
+    int bar_width = 40;  // width of progress bar
+    double progress = (double)step / total;
+
+    int pos = (int)(bar_width * progress);
+
+    printf("\r["); // start of progress bar
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) printf("=");
+        else if (i == pos) printf(">");
+        else printf(" ");
+    }
+    printf("] %3d%% ", (int)(progress * 100));
+    printf("Offset: %.6f Corr: %.6f", offset, corr);
+
+    fflush(stdout); // force immediate print
+}
 
 int main() {
     // Parameters
-    const char *fileA_fits = "dataA.fits";
-    const char *fileA_txt = "dataA.txt";
-    const char *fileB_fits = "dataB.fits";
-    const char *fileB_txt = "dataB.txt";
+    const char *fileA_fits = "../dataA.fits";
+    const char *fileA_txt = "../dataA.txt";
+    const char *fileB_fits = "../dataB.fits";
+    const char *fileB_txt = "../dataB.txt";
     int K = 10; // Number of PCA components
 
     // Load Data
@@ -482,73 +526,83 @@ int main() {
     perform_pca(dsA, K, &reducedA);
     perform_pca(dsB, K, &reducedB);
 
-    double minStep = std::numeric_limits<double>::max();
+    // Compute step based on frame frequency
+    double stepA = (dsA->time[1] - dsA->time[0]);
+    double stepB = (dsB->time[1] - dsB->time[0]);
+    double step = (stepA < stepB ? stepA : stepB);  // use smallest frame interval
 
-    size_t i = 0, j = 0;
-    size_t nA = dsA->time.size();
-    size_t nB = dsB->time.size();
-
-    while (i < nA && j < nB) {
-        double diff = std::abs(dsA->time[i] - dsB->time[j]);
-        minStep = std::min(minStep, diff);
-
-        // Move the pointer with the smaller timestamp
-        if (dsA->time[i] < dsB->time[j]) {
-            ++i;
-        } else {
-            ++j;
-        }
-    }
-    
     // Full range
     double min_offset = dsB->time[0] - dsA->time[dsA->n_frames-1];
     double max_offset = dsB->time[dsB->n_frames-1] - dsA->time[0];
 
     int scan_steps = lround((max_offset - min_offset) / step) + 1;
 
-    printf("Scanning offsets from %.2f to %.2f with step %.4f\n", min_offset, max_offset, scan_steps);
+    printf("Scanning offsets from %.2f to %.2f with step %.4f\n", min_offset, max_offset, step);
 
     // Allocate results
-    CorrelationPoint *scan_results = (CorrelationPoint*) malloc(scan_steps * sizeof(CorrelationPoint));
+    CorrelationPoint *scan_results = malloc(scan_steps * sizeof *scan_results);
     int result_count = 0;
 
     double max_corr = -1e9;
     double min_corr = 1e9;
     double best_offset = min_offset;
+    int best_idx = 0;
 
-    // Scan all offsets
-    for (double offset = min_offset; offset <= max_offset; offset += step) {
+    for (int i = 0; i < scan_steps; i++) {
+        double offset = min_offset + i * step;
         double corr = evaluate_offset(dsA, reducedA, dsB, reducedB, K, offset);
 
-        scan_results[result_count].offset = offset;
-        scan_results[result_count].correlation = corr;
-        result_count++;
-
-        printf("\nStep %d/%d\n", result_count, scan_steps);
-        printf("Time Offset: %.6f\n", offset);
-        printf("Correlation: %.6f\n", corr);
+        scan_results[i].offset = offset;
+        scan_results[i].correlation = corr;
+        print_progress(i ,scan_steps ,offset, corr);
 
         if (corr > max_corr) {
             max_corr = corr;
             best_offset = offset;
+            best_idx = i;
         }
         if (corr < min_corr) {
             min_corr = corr;
         }
     }
 
-// Done scanning, best_offset has maximum correlation
-printf("\nBest offset: %.6f with correlation: %.6f\n", best_offset, max_corr);
+    double refined_offset = best_offset;
+    double refined_corr   = max_corr;
 
-// Cleanup
-// free(scan_results); // free later if needed
+    // Need neighbors
+    if (best_idx > 0 && best_idx < scan_steps - 1) {
+
+        double y_m1 = scan_results[best_idx - 1].correlation;
+        double y_0  = scan_results[best_idx].correlation;
+        double y_p1 = scan_results[best_idx + 1].correlation;
+
+        double denom = (y_m1 - 2.0 * y_0 + y_p1);
+
+        // Avoid division by zero / flat peak
+        if (fabs(denom) > 1e-14) {
+            double delta = (y_m1 - y_p1) / (2.0 * denom);
+
+            // Clamp to avoid jumping outside neighbors
+            if (delta > 1.0)  delta = 1.0;
+            if (delta < -1.0) delta = -1.0;
+
+            refined_offset = best_offset + delta * step;
+            refined_corr   = y_0 - 0.25 * (y_m1 - y_p1) * delta;
+        }
+    }
+
+    // Done scanning, best_offset has maximum correlation
+    printf("\nBest offset: %.6f with correlation: %.6f\n", best_offset, max_corr);
+
+    // Cleanup
+    // free(scan_results); // free later if needed
 
     printf("\nBest Time Offset: %.6f\n", best_offset);
     printf("Max Correlation: %.6f\n", max_corr);
     printf("Min Correlation: %.6f\n", min_corr);
-
+    
     // Print plot
-    print_plot(scan_results, scan_steps, 0, max_corr);
+    print_plot(scan_results, scan_steps, min_corr, max_corr);
 
     // Cleanup
     free(scan_results);
