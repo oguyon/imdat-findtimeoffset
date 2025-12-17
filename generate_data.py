@@ -11,11 +11,19 @@ def create_dummy_data():
     framerate_A = 10.0 # 10 Hz
     framerate_B = 15.0 # 15 Hz
 
-    true_offset = 2.5 # seconds.
+    true_offset = 0.87 # seconds.
     # We want A(t) matches B(t + true_offset)
     # A(t) = S(t)
     # B(t') = S(t' - true_offset)
     # Check: B(t + true_offset) = S(t + true_offset - true_offset) = S(t) = A(t). Correct.
+
+    # Create a matrix for the quadratic relationship
+    n_pixels = height * width
+    intermediate_dim = 100  # d from the user's example
+    np.random.seed(42)  # for reproducibility
+    M_linear = np.random.randn(height , width)
+    Mquadra = np.random.randn(height , width)
+
 
     # Generate random spatial patterns (eigenimages)
     n_modes = 5
@@ -79,7 +87,17 @@ def create_dummy_data():
         for m in range(n_modes):
             frame += spatial_modes[m] * temporal_modes[m, idx]
 
-        data_B[i] = frame + 0.01 * np.random.randn(height, width)
+        # Introduce a matrix-based non-linear (quadratic) relationship
+        frame_squared = np.square(frame)
+        
+        # Combine linear and non-linear parts
+        frame_combined = frame @ M_linear  + frame_squared @ Mquadra
+
+        # Normalize to prevent extreme values from blowing up the signal
+        if np.max(np.abs(frame_combined)) > 0:
+            frame_combined /= np.max(np.abs(frame_combined))
+
+        data_B[i] = frame_combined + 0.01 * np.random.randn(height, width)
 
     # Save files
     hdu_A = fits.PrimaryHDU(data_A)

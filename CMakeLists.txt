@@ -3,20 +3,35 @@ project(TimeOffsetFinder C)
 
 set(CMAKE_C_STANDARD 99)
 
-# Find CFITSIO
-find_path(CFITSIO_INCLUDE_DIR fitsio.h)
-find_library(CFITSIO_LIBRARY cfitsio)
-
-# Find OpenBLAS
-find_path(CBLAS_INCLUDE_DIR cblas.h PATHS /usr/include/x86_64-linux-gnu /usr/include/openblas /usr/include)
-find_library(OPENBLAS_LIBRARY openblas)
-
-# Find LAPACKE
-find_path(LAPACKE_INCLUDE_DIR lapacke.h)
-find_library(LAPACKE_LIBRARY lapacke)
-find_library(LAPACK_LIBRARY lapack)
-
-include_directories(${CFITSIO_INCLUDE_DIR} ${CBLAS_INCLUDE_DIR} ${LAPACKE_INCLUDE_DIR})
+find_package(CFITSIO REQUIRED)
+find_package(LAPACK REQUIRED)
 
 add_executable(find_offset main.c)
-target_link_libraries(find_offset ${CFITSIO_LIBRARY} ${OPENBLAS_LIBRARY} ${LAPACKE_LIBRARY} ${LAPACK_LIBRARY} m)
+
+# CFITSIO
+if (TARGET CFITSIO::CFITSIO)
+    target_link_libraries(find_offset PRIVATE CFITSIO::CFITSIO)
+else()
+    target_include_directories(find_offset PRIVATE ${CFITSIO_INCLUDE_DIRS})
+    target_link_libraries(find_offset PRIVATE ${CFITSIO_LIBRARIES})
+endif()
+
+# Link LAPACK + LAPACKE
+target_link_libraries(find_offset PRIVATE
+    ${LAPACK_LIBRARIES}                   # For LAPACK & LAPACKE
+    /usr/local/opt/lapack/lib/liblapacke.dylib  # Explicit LAPACKE
+)
+# Includes for lapacke.h and cblas.h
+target_include_directories(find_offset
+    PRIVATE
+    ${LAPACK_INCLUDE_DIRS}
+    /usr/local/opt/openblas/include
+)
+
+# Link CFITSIO
+find_library(CFITSIO_LIBRARY cfitsio PATHS /usr/local/opt/cfitsio/lib)
+target_link_libraries(find_offset PRIVATE ${CFITSIO_LIBRARY})
+
+# Add math library if needed
+target_link_libraries(find_offset PRIVATE m)
+
