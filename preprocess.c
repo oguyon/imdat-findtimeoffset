@@ -28,8 +28,9 @@ typedef struct {
 typedef struct {
     double *times;
     double *times_end;
-    double *diffs; // SumSq diffs between consecutive frames
-    int n_frames;
+    double *diffs; // SumSq diffs between pairs
+    int n_pairs;   // Number of pairs
+    int n_frames;  // Number of original frames
 } DiffResult;
 
 int compare_filenames(const void *a, const void *b) {
@@ -185,6 +186,47 @@ void get_timestamps(const char *stream_name, double start_time, double end_time,
     printf("Collected %d timestamps from %s\n", count, stream_name);
 }
 
+// Helper: Calculate diffs for all pairs (i, j) with j > i
+void compute_all_diffs(double *data, int n_frames, int n_valid, double *timestamps, DiffResult *result, const char *stream_name) {
+    if (n_frames < 2) return;
+
+    // N*(N-1)/2 pairs
+    long n_pairs = (long)n_frames * (n_frames - 1) / 2;
+    result->n_frames = n_frames;
+    result->n_pairs = n_pairs;
+    result->times = (double*) malloc(n_pairs * sizeof(double));
+    result->times_end = (double*) malloc(n_pairs * sizeof(double));
+    result->diffs = (double*) malloc(n_pairs * sizeof(double));
+
+    long pair_idx = 0;
+    char diff_filename[MAX_FILENAME];
+    snprintf(diff_filename, sizeof(diff_filename), "%s.diff.txt", stream_name);
+    FILE *fdiff = fopen(diff_filename, "w");
+
+    for (int i = 0; i < n_frames; i++) {
+        for (int j = i + 1; j < n_frames; j++) {
+            double sum_sq = 0.0;
+            // Vector i start: i * n_valid
+            // Vector j start: j * n_valid
+            for (int p = 0; p < n_valid; p++) {
+                double val_i = data[(size_t)i * n_valid + p];
+                double val_j = data[(size_t)j * n_valid + p];
+                double d = val_j - val_i;
+                sum_sq += d * d;
+            }
+
+            result->times[pair_idx] = timestamps[i];
+            result->times_end[pair_idx] = timestamps[j];
+            result->diffs[pair_idx] = sum_sq;
+
+            fprintf(fdiff, "%.6f %.6f %.9f\n", timestamps[i], timestamps[j], sum_sq);
+            pair_idx++;
+        }
+    }
+    fclose(fdiff);
+    printf("Written diff file to %s (%ld pairs)\n", diff_filename, n_pairs);
+}
+
 // Returns DiffResult if do_diff is true, else NULL
 DiffResult* process_stream(const char *stream_name, double start_time, double end_time, const char *output_txt_file, int do_mask_processing, double dt, double *target_ts, int n_target, int do_diff) {
     printf("Processing stream %s (Time: %.4f - %.4f, Resampling: %s, Mode: %s)\n",
@@ -319,8 +361,8 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
     DiffResult *result = NULL;
     if (do_diff) {
         result = (DiffResult*) malloc(sizeof(DiffResult));
-        result->n_frames = 0; // Will update
-        // We might not know exact n_frames yet if resampling
+        result->n_frames = 0;
+        result->n_pairs = 0;
     }
 
     // --- Processing Logic ---
@@ -336,28 +378,18 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
         }
 
         double *out_data = (double*) malloc((size_t)n_valid * (size_t)n_resampled * sizeof(double));
+        double *timestamps = (double*) malloc(n_resampled * sizeof(double));
+
         FILE *fout = fopen(output_txt_file, "w");
         double *buf0 = (double*) malloc(n_pixels * sizeof(double));
         double *buf1 = (double*) malloc(n_pixels * sizeof(double));
         int idx0 = -1, idx1 = -1;
 
-        if (do_diff) {
-            result->n_frames = n_resampled - 1; // n vectors -> n-1 diffs
-            if (result->n_frames > 0) {
-                result->times = (double*) malloc(result->n_frames * sizeof(double));
-                result->times_end = (double*) malloc(result->n_frames * sizeof(double));
-                result->diffs = (double*) malloc(result->n_frames * sizeof(double));
-            }
-        }
-
-        // Need to buffer previous vector for diff
-        double *prev_vec = NULL;
-        if (do_diff) prev_vec = (double*) malloc(n_valid * sizeof(double));
-
         for (int k = 0; k < n_resampled; k++) {
             double T;
             if (target_ts) T = target_ts[k];
             else { T = start_time + k * dt; if (T > end_time) break; }
+            timestamps[k] = T;
 
             int i_left = -1, i_right = -1;
             int right_idx = -1;
@@ -379,36 +411,17 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
                 int pix = valid_indices[p];
                 double res = (buf0[pix] * mask[pix]) + alpha * ((buf1[pix] * mask[pix]) - (buf0[pix] * mask[pix]));
                 out_data[(size_t)k * n_valid + p] = res;
-
-                if (do_diff && k > 0) {
-                    // Diff with prev
-                    // But we iterate p inside k. Need to accumulate.
-                    // Let's do diff calc after filling out_data row or maintain separate sum.
-                    // Better to fill vector first.
-                }
-            }
-
-            if (do_diff) {
-                if (k > 0) {
-                    double sum_sq = 0.0;
-                    for (int p = 0; p < n_valid; p++) {
-                        double curr = out_data[(size_t)k * n_valid + p];
-                        double prev = prev_vec[p];
-                        sum_sq += (curr - prev)*(curr - prev);
-                    }
-                    result->diffs[k-1] = sum_sq;
-                    result->times[k-1] = (target_ts ? target_ts[k-1] : (start_time + (k-1)*dt));
-                    result->times_end[k-1] = T;
-                }
-                // Update prev_vec
-                for (int p = 0; p < n_valid; p++) prev_vec[p] = out_data[(size_t)k * n_valid + p];
             }
 
             fprintf(fout, "%d %.6f interpolated 0\n", k, T);
         }
         fclose(fout);
         free(buf0); free(buf1);
-        if (prev_vec) free(prev_vec);
+
+        if (do_diff) {
+            compute_all_diffs(out_data, n_resampled, n_valid, timestamps, result, stream_name);
+        }
+        free(timestamps);
 
         fitsfile *fptr; int status = 0;
         char out_fits_name[MAX_FILENAME];
@@ -436,11 +449,13 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
         // If do_diff is on, we need vectors.
         if (do_mask_processing || do_diff) {
              double *out_data = (double*) malloc((size_t)n_valid * (size_t)frame_count * sizeof(double));
+             double *timestamps = (double*) malloc(frame_count * sizeof(double));
              double *frame_buf = (double*) malloc(n_pixels * sizeof(double));
              char current_file[MAX_FILENAME] = "";
              fitsfile *fptr = NULL; int status = 0;
 
              for (int i = 0; i < frame_count; i++) {
+                 timestamps[i] = frames[i].timestamp;
                  char filepath[MAX_FILENAME * 2];
                  snprintf(filepath, sizeof(filepath), "%s/%s", stream_name, frames[i].fits_filename);
                  if (strcmp(filepath, current_file) != 0) {
@@ -467,39 +482,13 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
                  fits_close_file(fout_fits, &status);
              }
 
-             // Calc Diff from out_data
              if (do_diff) {
-                 result->n_frames = frame_count - 1;
-                 result->times = (double*) malloc(result->n_frames * sizeof(double));
-                 result->times_end = (double*) malloc(result->n_frames * sizeof(double));
-                 result->diffs = (double*) malloc(result->n_frames * sizeof(double));
-
-                 for (int i = 0; i < frame_count - 1; i++) {
-                     double sum_sq = 0.0;
-                     for(int p=0; p<n_valid; p++) {
-                         double v0 = out_data[(size_t)i * n_valid + p];
-                         double v1 = out_data[(size_t)(i+1) * n_valid + p];
-                         sum_sq += (v1-v0)*(v1-v0);
-                     }
-                     result->diffs[i] = sum_sq;
-                     result->times[i] = frames[i].timestamp;
-                     result->times_end[i] = frames[i+1].timestamp;
-                 }
+                 compute_all_diffs(out_data, frame_count, n_valid, timestamps, result, stream_name);
              }
 
+             free(timestamps);
              free(out_data);
         }
-    }
-
-    if (do_diff && result && result->n_frames > 0) {
-        char diff_filename[MAX_FILENAME];
-        snprintf(diff_filename, sizeof(diff_filename), "%s.diff.txt", stream_name);
-        FILE *fdiff = fopen(diff_filename, "w");
-        for(int i=0; i<result->n_frames; i++) {
-            fprintf(fdiff, "%.6f %.6f %.9f\n", result->times[i], result->times_end[i], result->diffs[i]);
-        }
-        fclose(fdiff);
-        printf("Written diff file to %s\n", diff_filename);
     }
 
     if (mask) free(mask);
@@ -575,9 +564,21 @@ int main(int argc, char *argv[]) {
             snprintf(outfile, sizeof(outfile), "diff_ndt_%d.txt", ndt);
             FILE *f = fopen(outfile, "w");
 
-            for (int N = 0; N < resA->n_frames; N++) {
-                int K = N + ndt;
-                if (K >= 0 && K < resB->n_frames) {
+            // Loop over pairs in A
+            // resA->times has N_pairs elements.
+            // pair_idx = i*(2N - 1 - i)/2 + (j - i - 1)
+            // But we just iterated flatly.
+            // How do we match "Line N" and "Line N+ndt"?
+            // We assume the user implies "Line N of the FILE", which matches "pair N of the stored list".
+            // Since both files are generated by the same logic (all unique pairs, sorted by i then j),
+            // matching Line N to Line N+ndt matches the N-th pair of A to the (N+ndt)-th pair of B.
+
+            long N_pairs_A = resA->n_pairs;
+            long N_pairs_B = resB->n_pairs;
+
+            for (long N = 0; N < N_pairs_A; N++) {
+                long K = N + ndt;
+                if (K >= 0 && K < N_pairs_B) {
                     fprintf(f, "%.6f %.6f %.9f %.6f %.6f %.9f\n",
                             resA->times[N], resA->times_end[N], resA->diffs[N],
                             resB->times[K], resB->times_end[K], resB->diffs[K]);
