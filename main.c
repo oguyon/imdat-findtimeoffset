@@ -18,6 +18,49 @@ typedef struct {
     int height;
 } DataSet;
 
+// Load Mask Data (2D FITS)
+double* load_mask(const char *filename, int width, int height) {
+    fitsfile *fptr;
+    int status = 0;
+    int naxis;
+    long naxes[2];
+
+    printf("Loading mask %s...\n", filename);
+
+    if (fits_open_file(&fptr, filename, READONLY, &status)) {
+        fits_report_error(stderr, status);
+        exit(status);
+    }
+
+    if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
+    if (naxis != 2) {
+        fprintf(stderr, "Error: Mask FITS file must have 2 dimensions (X, Y)\n");
+        exit(1);
+    }
+
+    if (fits_get_img_size(fptr, 2, naxes, &status)) CHECK_STATUS(status);
+
+    if (naxes[0] != width || naxes[1] != height) {
+        fprintf(stderr, "Error: Mask dimensions (%ld x %ld) do not match dataset dimensions (%d x %d)\n",
+                naxes[0], naxes[1], width, height);
+        exit(1);
+    }
+
+    size_t data_size = (size_t)width * (size_t)height;
+    double *mask = (double*) malloc(data_size * sizeof(double));
+    if (!mask) {
+        fprintf(stderr, "Error: Memory allocation failed for mask data\n");
+        exit(1);
+    }
+
+    long fpixel[2] = {1, 1};
+    if (fits_read_pix(fptr, TDOUBLE, fpixel, data_size, NULL, mask, NULL, &status)) CHECK_STATUS(status);
+
+    fits_close_file(fptr, &status); CHECK_STATUS(status);
+
+    return mask;
+}
+
 // Load FITS and timing data
 DataSet* load_dataset(const char *fits_file, const char *txt_file) {
     fitsfile *fptr;
@@ -396,17 +439,67 @@ double evaluate_offset(DataSet *dsA, double *reducedA, DataSet *dsB, double *red
 }
 
 
-int main() {
+int main(int argc, char *argv[]) {
     // Parameters
     const char *fileA_fits = "dataA.fits";
     const char *fileA_txt = "dataA.txt";
     const char *fileB_fits = "dataB.fits";
     const char *fileB_txt = "dataB.txt";
+    const char *maskA_file = NULL;
+    const char *maskB_file = NULL;
+
     int K = 10; // Number of PCA components
 
-    // Load Data
+    // Parse command-line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--maskA") == 0) {
+            if (i + 1 < argc) {
+                maskA_file = argv[++i];
+            } else {
+                fprintf(stderr, "Error: --maskA requires a filename argument.\n");
+                exit(1);
+            }
+        } else if (strcmp(argv[i], "--maskB") == 0) {
+             if (i + 1 < argc) {
+                maskB_file = argv[++i];
+            } else {
+                fprintf(stderr, "Error: --maskB requires a filename argument.\n");
+                exit(1);
+            }
+        }
+    }
+
+    // Load Data A
     DataSet *dsA = load_dataset(fileA_fits, fileA_txt);
+
+    // Apply Mask A if specified
+    if (maskA_file) {
+        double *maskA = load_mask(maskA_file, dsA->width, dsA->height);
+        // Multiply
+        for (int i = 0; i < dsA->n_frames; i++) {
+            for (int j = 0; j < dsA->n_pixels; j++) {
+                dsA->data[i * dsA->n_pixels + j] *= maskA[j];
+            }
+        }
+        free(maskA);
+        printf("Applied mask %s to Dataset A\n", maskA_file);
+    }
+
+    // Load Data B
     DataSet *dsB = load_dataset(fileB_fits, fileB_txt);
+
+    // Apply Mask B if specified
+    if (maskB_file) {
+        double *maskB = load_mask(maskB_file, dsB->width, dsB->height);
+        // Multiply
+        for (int i = 0; i < dsB->n_frames; i++) {
+            for (int j = 0; j < dsB->n_pixels; j++) {
+                dsB->data[i * dsB->n_pixels + j] *= maskB[j];
+            }
+        }
+        free(maskB);
+        printf("Applied mask %s to Dataset B\n", maskB_file);
+    }
 
     // Perform PCA
     double *reducedA, *reducedB;
