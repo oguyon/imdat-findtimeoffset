@@ -115,9 +115,80 @@ void read_frame_data(const char *stream_name, FrameInfo *frame, int expected_pix
     fits_close_file(fptr, &status);
 }
 
+// Collect timestamps from a stream
+void get_timestamps(const char *stream_name, double start_time, double end_time, double **timestamps, int *n_timestamps) {
+    DIR *dir = opendir(stream_name);
+    if (!dir) {
+        perror("Error opening stream directory for timestamp scan");
+        exit(1);
+    }
 
-void process_stream(const char *stream_name, double start_time, double end_time, const char *output_txt_file, int do_mask_processing, double dt) {
-    printf("Processing stream %s (Time: %.4f - %.4f, dt: %.4f)\n", stream_name, start_time, end_time, dt);
+    struct dirent *ent;
+    FileInfo *files = NULL;
+    int file_count = 0;
+    int capacity = 100;
+
+    files = (FileInfo *)malloc(capacity * sizeof(FileInfo));
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, stream_name, strlen(stream_name)) == 0 &&
+            strstr(ent->d_name, ".txt") != NULL &&
+            ent->d_name[strlen(ent->d_name) - 4] == '.') {
+            if (file_count >= capacity) {
+                capacity *= 2;
+                files = (FileInfo *)realloc(files, capacity * sizeof(FileInfo));
+            }
+            strncpy(files[file_count].filename, ent->d_name, MAX_FILENAME - 1);
+            files[file_count].filename[MAX_FILENAME - 1] = '\0';
+            file_count++;
+        }
+    }
+    closedir(dir);
+
+    qsort(files, file_count, sizeof(FileInfo), compare_filenames);
+
+    // Scan files for timestamps
+    int count = 0;
+    int cap = 1000;
+    double *ts_list = (double*)malloc(cap * sizeof(double));
+
+    for (int i = 0; i < file_count; i++) {
+        char filepath[MAX_FILENAME * 2];
+        snprintf(filepath, sizeof(filepath), "%s/%s", stream_name, files[i].filename);
+        FILE *fin = fopen(filepath, "r");
+        if (!fin) continue;
+
+        char line[MAX_LINE_LENGTH];
+        while (fgets(line, sizeof(line), fin)) {
+            char *ptr = line;
+            while (isspace(*ptr)) ptr++;
+            if (*ptr == '#' || *ptr == '\0') continue;
+
+            long col1, col2;
+            double col3, col4, col5;
+            if (sscanf(line, "%ld %ld %lf %lf %lf", &col1, &col2, &col3, &col4, &col5) >= 5) {
+                if (col5 >= start_time && col5 <= end_time) {
+                    if (count >= cap) {
+                        cap *= 2;
+                        ts_list = (double*)realloc(ts_list, cap * sizeof(double));
+                    }
+                    ts_list[count++] = col5;
+                }
+            }
+        }
+        fclose(fin);
+    }
+    free(files);
+
+    *timestamps = ts_list;
+    *n_timestamps = count;
+    printf("Collected %d timestamps from %s\n", count, stream_name);
+}
+
+void process_stream(const char *stream_name, double start_time, double end_time, const char *output_txt_file, int do_mask_processing, double dt, double *target_ts, int n_target) {
+    printf("Processing stream %s (Time: %.4f - %.4f, Resampling: %s)\n",
+            stream_name, start_time, end_time,
+            (target_ts ? "Target Grid" : (dt > 0 ? "Fixed dt" : "None")));
 
     DIR *dir = opendir(stream_name);
     if (!dir) {
@@ -151,14 +222,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
 
     qsort(files, file_count, sizeof(FileInfo), compare_filenames);
 
-    // Collect valid frames (in input window, with some buffer for interpolation if needed)
-    // If dt > 0, we need frames around start_time and end_time, so we should look slightly broader if possible,
-    // but the task says "find all frames... that fit within the timestart-timeend window".
-    // I will stick to loading frames strictly within window for listing,
-    // but for interpolation, we might need one frame before/after.
-    // However, since we parse files based on filename, and files contain multiple frames...
-    // Let's assume we just parse everything we found that matches the stream name.
-
     FrameInfo *frames = NULL;
     int frame_count = 0;
     int frame_capacity = 1000;
@@ -182,11 +245,12 @@ void process_stream(const char *stream_name, double start_time, double end_time,
             int items = sscanf(line, "%ld %ld %lf %lf %lf", &col1, &col2, &col3, &col4, &col5);
 
             if (items >= 5) {
-                // If resampling, we want as many frames as possible for coverage.
-                // But let's stick to the window constraint to avoid excessive loading.
-                // Actually, if T=start_time, we might need a frame just before start_time for interpolation.
-                // Let's widen the acceptance window slightly if dt > 0.
-                double margin = (dt > 0) ? dt * 2.0 : 0.0;
+                // If resampling (dt > 0 or target_ts), widen window slightly
+                double margin = (dt > 0 || target_ts) ? 0.1 : 0.0; // Arbitrary small margin if dt is unknown, or rely on logic
+                if (dt > 0) margin = dt * 2.0;
+
+                // If target_ts provided, we might need frames covering the full range of target_ts
+                // The passed start_time/end_time should cover it.
 
                 if (col5 >= start_time - margin && col5 <= end_time + margin) {
                     if (frame_count >= frame_capacity) {
@@ -205,7 +269,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
     }
     free(files);
 
-    // If no data, exit early
     if (frame_count == 0) {
         printf("No frames found in window.\n");
         free(frames);
@@ -216,11 +279,10 @@ void process_stream(const char *stream_name, double start_time, double end_time,
     int width = 0, height = 0;
     double *mask = NULL;
 
-    if (do_mask_processing || dt > 0) {
+    if (do_mask_processing || dt > 0 || target_ts) {
         mask = load_mask(stream_name, &width, &height);
 
         if (!mask) {
-             // Load dims from first frame
             char first_fits[MAX_FILENAME * 2];
             snprintf(first_fits, sizeof(first_fits), "%s/%s", stream_name, frames[0].fits_filename);
 
@@ -259,19 +321,20 @@ void process_stream(const char *stream_name, double start_time, double end_time,
 
     // Processing Logic
 
-    if (dt > 0) {
+    if (dt > 0 || target_ts) {
         // RESAMPLING MODE
-        // Generate Grid
-        int n_resampled = (int)ceil((end_time - start_time) / dt);
-        // Ensure strictly within? Or cover? k=0 -> start_time. k=n -> start + n*dt.
-        // If start + n*dt > end_time?
-        // Let's do floor or ceil? Usually inclusive of start, up to end.
-        if (n_resampled < 1) n_resampled = 1;
+        int n_resampled = 0;
 
-        // Allocate output: N_valid x N_resampled
+        // Use target_ts if provided, otherwise generate grid from dt
+        if (target_ts) {
+            n_resampled = n_target;
+        } else {
+            n_resampled = (int)ceil((end_time - start_time) / dt);
+            if (n_resampled < 1) n_resampled = 1;
+        }
+
         double *out_data = (double*) malloc((size_t)n_valid * (size_t)n_resampled * sizeof(double));
 
-        // Prepare metadata for text file
         FILE *fout = fopen(output_txt_file, "w");
         if (!fout) { perror("Error opening output file"); exit(1); }
 
@@ -280,23 +343,19 @@ void process_stream(const char *stream_name, double start_time, double end_time,
         int idx0 = -1;
         int idx1 = -1;
 
-        // Iterate Resampled Steps
         for (int k = 0; k < n_resampled; k++) {
-            double T = start_time + k * dt;
-            if (T > end_time) break;
-
-            // Find frames bracket: frames[i].ts <= T < frames[i+1].ts
-            // Linear search since T increases
-            // Or simple scan.
-
-            // Find idx such that frames[idx] <= T.
-            // Since sorted, we can search from last known pos.
-            // But let's just search.
+            double T;
+            if (target_ts) {
+                T = target_ts[k];
+            } else {
+                T = start_time + k * dt;
+                if (T > end_time) break;
+            }
 
             int i_left = -1;
             int i_right = -1;
 
-            // Look for first frame > T
+            // Find bracket for T
             int right_idx = -1;
             for (int i = 0; i < frame_count; i++) {
                 if (frames[i].timestamp > T) {
@@ -306,19 +365,16 @@ void process_stream(const char *stream_name, double start_time, double end_time,
             }
 
             if (right_idx == -1) {
-                // T is after all frames
                 i_left = frame_count - 1;
-                i_right = frame_count - 1; // Clamp
+                i_right = frame_count - 1;
             } else if (right_idx == 0) {
-                // T is before all frames
                 i_left = 0;
-                i_right = 0; // Clamp
+                i_right = 0;
             } else {
                 i_left = right_idx - 1;
                 i_right = right_idx;
             }
 
-            // Load Data if needed
             if (idx0 != i_left) {
                 read_frame_data(stream_name, &frames[i_left], n_pixels, buf0, &width, &height);
                 idx0 = i_left;
@@ -328,7 +384,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
                 idx1 = i_right;
             }
 
-            // Interpolate
             double t0 = frames[i_left].timestamp;
             double t1 = frames[i_right].timestamp;
             double alpha = 0.0;
@@ -337,20 +392,14 @@ void process_stream(const char *stream_name, double start_time, double end_time,
                 alpha = (T - t0) / (t1 - t0);
             }
 
-            // Extract & Interpolate
             for (int p = 0; p < n_valid; p++) {
                 int pix = valid_indices[p];
                 double val0 = buf0[pix] * mask[pix];
                 double val1 = buf1[pix] * mask[pix];
                 double res = val0 + alpha * (val1 - val0);
-                out_data[(size_t)k * n_valid + p] = res; // Column-major in (Frame, Pixel)? No, previous was Row-major in (Frame, Pixel)
-                // Previous: out_data[(size_t)i * n_valid + k] where i=frame, k=pixel.
-                // Row-major: Frame 0 [pix 0..N], Frame 1 [pix 0..N].
-                // So index = frame_idx * n_valid + pix_idx.
-                // Here frame_idx = k.
+                out_data[(size_t)k * n_valid + p] = res;
             }
 
-            // Write to text list: k  T  "interpolated"  0
             fprintf(fout, "%d %.6f interpolated 0\n", k, T);
         }
 
@@ -358,7 +407,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
         free(buf0);
         free(buf1);
 
-        // Write FITS
         fitsfile *fptr;
         int status = 0;
         char out_fits_name[MAX_FILENAME];
@@ -375,8 +423,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
 
     } else {
         // ORIGINAL LOGIC (No Resampling)
-
-        // Write Text Output
         FILE *fout = fopen(output_txt_file, "w");
         if (!fout) { perror("Error opening output file"); exit(1); }
         for (int i = 0; i < frame_count; i++) {
@@ -409,7 +455,6 @@ void process_stream(const char *stream_name, double start_time, double end_time,
                     if (fits_open_file(&fptr, filepath, READONLY, &status)) {
                          fits_report_error(stderr, status); status = 0; continue;
                     }
-                    // Verify Dims
                     int naxis; long naxes[3];
                     if (fits_get_img_dim(fptr, &naxis, &status) == 0 && fits_get_img_size(fptr, 3, naxes, &status) == 0) {
                         if (naxes[0] != width || naxes[1] != height) {
@@ -454,9 +499,10 @@ void process_stream(const char *stream_name, double start_time, double end_time,
 int main(int argc, char *argv[]) {
     int do_mask = 0;
     double dt = 0.0;
+    int resample_A = 0;
+    int resample_B = 0;
     int arg_idx = 1;
 
-    // Simple arg parsing
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "-m") == 0) {
             do_mask = 1;
@@ -469,14 +515,25 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: -dt requires a value.\n");
                 return 1;
             }
+        } else if (strcmp(argv[arg_idx], "-A") == 0) {
+            resample_A = 1;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-B") == 0) {
+            resample_B = 1;
+            arg_idx++;
         } else {
             fprintf(stderr, "Unknown option %s\n", argv[arg_idx]);
             return 1;
         }
     }
 
+    if (resample_A && resample_B) {
+        fprintf(stderr, "Error: Cannot use both -A and -B.\n");
+        return 1;
+    }
+
     if (argc - arg_idx != 4) {
-        fprintf(stderr, "Usage: %s [-m] [-dt val] <streamA> <streamB> <timestart> <timeend>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [-m] [-dt val | -A | -B] <streamA> <streamB> <timestart> <timeend>\n", argv[0]);
         return 1;
     }
 
@@ -489,8 +546,27 @@ int main(int argc, char *argv[]) {
     snprintf(outA, sizeof(outA), "%s.flist.txt", streamA);
     snprintf(outB, sizeof(outB), "%s.flist.txt", streamB);
 
-    process_stream(streamA, timestart, timeend, outA, do_mask, dt);
-    process_stream(streamB, timestart, timeend, outB, do_mask, dt);
+    // Logic for -A or -B
+    double *timestamps = NULL;
+    int n_timestamps = 0;
+
+    if (resample_A) {
+        get_timestamps(streamA, timestart, timeend, &timestamps, &n_timestamps);
+        // Process A naturally (or with target=timestamps, effectively identity but safer to ensure exact match)
+        // Actually, if we pass target timestamps matching A's original, interpolation returns A's values (mostly).
+        // Let's pass the timestamps to A too, to ensure "resampled to A" (which is identity for A).
+        process_stream(streamA, timestart, timeend, outA, do_mask, 0.0, timestamps, n_timestamps);
+        process_stream(streamB, timestart, timeend, outB, do_mask, 0.0, timestamps, n_timestamps);
+    } else if (resample_B) {
+        get_timestamps(streamB, timestart, timeend, &timestamps, &n_timestamps);
+        process_stream(streamA, timestart, timeend, outA, do_mask, 0.0, timestamps, n_timestamps);
+        process_stream(streamB, timestart, timeend, outB, do_mask, 0.0, timestamps, n_timestamps);
+    } else {
+        process_stream(streamA, timestart, timeend, outA, do_mask, dt, NULL, 0);
+        process_stream(streamB, timestart, timeend, outB, do_mask, dt, NULL, 0);
+    }
+
+    if (timestamps) free(timestamps);
 
     return 0;
 }
