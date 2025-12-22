@@ -1,5 +1,5 @@
 build/
 *.fits
-*.txt
-streamA/
-streamB/
+data*.txt
+stream*.txt
+!CMakeLists.txt
