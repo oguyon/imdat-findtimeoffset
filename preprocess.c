@@ -187,16 +187,15 @@ void get_timestamps(const char *stream_name, double start_time, double end_time,
 }
 
 // Helper: Calculate diffs for all pairs (i, j) with j > i
-void compute_all_diffs(double *data, int n_frames, int n_valid, double *timestamps, DiffResult *result, const char *stream_name) {
+void compute_all_diffs(double *data, int n_frames, int n_valid, double *timestamps, DiffResult *result, const char *stream_name, double dtlim) {
     if (n_frames < 2) return;
 
-    // N*(N-1)/2 pairs
-    long n_pairs = (long)n_frames * (n_frames - 1) / 2;
+    // N*(N-1)/2 pairs max
+    long max_pairs = (long)n_frames * (n_frames - 1) / 2;
     result->n_frames = n_frames;
-    result->n_pairs = n_pairs;
-    result->times = (double*) malloc(n_pairs * sizeof(double));
-    result->times_end = (double*) malloc(n_pairs * sizeof(double));
-    result->diffs = (double*) malloc(n_pairs * sizeof(double));
+    result->times = (double*) malloc(max_pairs * sizeof(double));
+    result->times_end = (double*) malloc(max_pairs * sizeof(double));
+    result->diffs = (double*) malloc(max_pairs * sizeof(double));
 
     long pair_idx = 0;
     char diff_filename[MAX_FILENAME];
@@ -205,6 +204,8 @@ void compute_all_diffs(double *data, int n_frames, int n_valid, double *timestam
 
     for (int i = 0; i < n_frames; i++) {
         for (int j = i + 1; j < n_frames; j++) {
+            if ((timestamps[j] - timestamps[i]) <= dtlim) continue;
+
             double sum_sq = 0.0;
             // Vector i start: i * n_valid
             // Vector j start: j * n_valid
@@ -224,11 +225,12 @@ void compute_all_diffs(double *data, int n_frames, int n_valid, double *timestam
         }
     }
     fclose(fdiff);
-    printf("Written diff file to %s (%ld pairs)\n", diff_filename, n_pairs);
+    result->n_pairs = pair_idx;
+    printf("Written diff file to %s (%ld pairs)\n", diff_filename, pair_idx);
 }
 
 // Returns DiffResult if do_diff is true, else NULL
-DiffResult* process_stream(const char *stream_name, double start_time, double end_time, const char *output_txt_file, int do_mask_processing, double dt, double *target_ts, int n_target, int do_diff) {
+DiffResult* process_stream(const char *stream_name, double start_time, double end_time, const char *output_txt_file, int do_mask_processing, double dt, double *target_ts, int n_target, int do_diff, double dtlim) {
     printf("Processing stream %s (Time: %.4f - %.4f, Resampling: %s, Mode: %s)\n",
             stream_name, start_time, end_time,
             (target_ts ? "Target Grid" : (dt > 0 ? "Fixed dt" : "None")),
@@ -419,7 +421,7 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
         free(buf0); free(buf1);
 
         if (do_diff) {
-            compute_all_diffs(out_data, n_resampled, n_valid, timestamps, result, stream_name);
+            compute_all_diffs(out_data, n_resampled, n_valid, timestamps, result, stream_name, dtlim);
         }
         free(timestamps);
 
@@ -483,7 +485,7 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
              }
 
              if (do_diff) {
-                 compute_all_diffs(out_data, frame_count, n_valid, timestamps, result, stream_name);
+                 compute_all_diffs(out_data, frame_count, n_valid, timestamps, result, stream_name, dtlim);
              }
 
              free(timestamps);
@@ -505,6 +507,7 @@ int main(int argc, char *argv[]) {
     int resample_B = 0;
     int ndtmax = -1;
     int do_diff = 0;
+    double dtlim = -1.0;
     int arg_idx = 1;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
@@ -524,6 +527,9 @@ int main(int argc, char *argv[]) {
             ndtmax = atoi(argv[++arg_idx]);
             do_diff = 1;
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-dtlim") == 0) {
+            dtlim = atof(argv[++arg_idx]);
+            arg_idx++;
         } else {
             fprintf(stderr, "Unknown option %s\n", argv[arg_idx]);
             return 1;
@@ -533,7 +539,7 @@ int main(int argc, char *argv[]) {
     if (resample_A && resample_B) { fprintf(stderr, "Error: Cannot use both -A and -B.\n"); return 1; }
 
     if (argc - arg_idx != 4) {
-        fprintf(stderr, "Usage: %s [-m] [-dt val | -A | -B] [-odiff ndtmax] <streamA> <streamB> <timestart> <timeend>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [-m] [-dt val | -A | -B] [-odiff ndtmax] [-dtlim val] <streamA> <streamB> <timestart> <timeend>\n", argv[0]);
         return 1;
     }
 
@@ -553,8 +559,8 @@ int main(int argc, char *argv[]) {
     if (resample_B) get_timestamps(streamB, timestart, timeend, &timestamps, &n_timestamps);
 
     // Call process_stream for both, passing all flags
-    DiffResult *resA = process_stream(streamA, timestart, timeend, outA, do_mask, dt, timestamps, n_timestamps, do_diff);
-    DiffResult *resB = process_stream(streamB, timestart, timeend, outB, do_mask, dt, timestamps, n_timestamps, do_diff);
+    DiffResult *resA = process_stream(streamA, timestart, timeend, outA, do_mask, dt, timestamps, n_timestamps, do_diff, dtlim);
+    DiffResult *resB = process_stream(streamB, timestart, timeend, outB, do_mask, dt, timestamps, n_timestamps, do_diff, dtlim);
 
     if (timestamps) free(timestamps);
 
