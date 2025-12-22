@@ -20,3 +20,5 @@ include_directories(${CFITSIO_INCLUDE_DIR} ${CBLAS_INCLUDE_DIR} ${LAPACKE_INCLUD
 
 add_executable(find_offset main.c)
 target_link_libraries(find_offset ${CFITSIO_LIBRARY} ${OPENBLAS_LIBRARY} ${LAPACKE_LIBRARY} ${LAPACK_LIBRARY} m)
+
+add_executable(preprocess preprocess.c)
