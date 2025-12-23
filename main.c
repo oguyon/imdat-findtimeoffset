@@ -18,7 +18,7 @@ typedef struct {
     int height;
 } DataSet;
 
-// Load Mask Data (2D FITS)
+// Load Mask Data (1D or 2D FITS)
 double* load_mask(const char *filename, int width, int height) {
     fitsfile *fptr;
     int status = 0;
@@ -33,16 +33,26 @@ double* load_mask(const char *filename, int width, int height) {
     }
 
     if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
-    if (naxis != 2) {
-        fprintf(stderr, "Error: Mask FITS file must have 2 dimensions (X, Y)\n");
+    if (naxis != 1 && naxis != 2) {
+        fprintf(stderr, "Error: Mask FITS file must have 1 or 2 dimensions\n");
         exit(1);
     }
 
-    if (fits_get_img_size(fptr, 2, naxes, &status)) CHECK_STATUS(status);
+    if (fits_get_img_size(fptr, naxis, naxes, &status)) CHECK_STATUS(status);
 
-    if (naxes[0] != width || naxes[1] != height) {
+    // If 1D mask, check if matches width. Height implicit 1.
+    // If 2D mask, check if matches width and height.
+    // Note: ds->width is naxes[0] of dataset (spatial). ds->height is naxes[1] if 3D, else 1.
+
+    // Dataset spatial dims: (ds->width, ds->height)
+    // Mask spatial dims: (naxes[0], naxis==2 ? naxes[1] : 1)
+
+    long mask_w = naxes[0];
+    long mask_h = (naxis == 2) ? naxes[1] : 1;
+
+    if (mask_w != width || mask_h != height) {
         fprintf(stderr, "Error: Mask dimensions (%ld x %ld) do not match dataset dimensions (%d x %d)\n",
-                naxes[0], naxes[1], width, height);
+                mask_w, mask_h, width, height);
         exit(1);
     }
 
@@ -53,6 +63,7 @@ double* load_mask(const char *filename, int width, int height) {
         exit(1);
     }
 
+    // Read mask
     long fpixel[2] = {1, 1};
     if (fits_read_pix(fptr, TDOUBLE, fpixel, data_size, NULL, mask, NULL, &status)) CHECK_STATUS(status);
 
@@ -76,17 +87,25 @@ DataSet* load_dataset(const char *fits_file, const char *txt_file) {
     }
 
     if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
-    if (naxis != 3) {
-        fprintf(stderr, "Error: FITS file must have 3 dimensions (X, Y, Time)\n");
+    if (naxis != 2 && naxis != 3) {
+        fprintf(stderr, "Error: FITS file must have 2 or 3 dimensions\n");
         exit(1);
     }
 
-    if (fits_get_img_size(fptr, 3, naxes, &status)) CHECK_STATUS(status);
+    if (fits_get_img_size(fptr, naxis, naxes, &status)) CHECK_STATUS(status);
 
     DataSet *ds = (DataSet*) malloc(sizeof(DataSet));
-    ds->width = naxes[0];
-    ds->height = naxes[1];
-    ds->n_frames = naxes[2];
+
+    if (naxis == 3) {
+        ds->width = naxes[0];
+        ds->height = naxes[1];
+        ds->n_frames = naxes[2];
+    } else { // naxis == 2
+        // Axis 2 is time index
+        ds->width = naxes[0];
+        ds->height = 1;
+        ds->n_frames = naxes[1];
+    }
     ds->n_pixels = ds->width * ds->height;
 
     printf("Dimensions: %d x %d x %d\n", ds->width, ds->height, ds->n_frames);
@@ -101,10 +120,6 @@ DataSet* load_dataset(const char *fits_file, const char *txt_file) {
     }
 
     // Read data
-    // FITS stores as Time blocks of (Y, X). We want to read all.
-    // fits_read_img reads data into the array.
-    // If the file is float or double, we can read directly.
-    // We assume we want doubles.
     long fpixel[3] = {1, 1, 1};
     if (fits_read_pix(fptr, TDOUBLE, fpixel, data_size, NULL, ds->data, NULL, &status)) CHECK_STATUS(status);
 
