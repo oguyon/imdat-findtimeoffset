@@ -49,6 +49,7 @@ void get_fits_filename(const char *txt_filename, char *fits_filename) {
     }
 }
 
+// Load mask or return NULL if not found. Sets width/height.
 double* load_mask(const char *stream_name, int *width, int *height) {
     char mask_filename[MAX_FILENAME];
     snprintf(mask_filename, sizeof(mask_filename), "%s.mask.fits", stream_name);
@@ -69,14 +70,14 @@ double* load_mask(const char *stream_name, int *width, int *height) {
     }
 
     if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
-    if (naxis != 2) {
-        fprintf(stderr, "Error: Mask FITS file must have 2 dimensions (X, Y)\n");
+    if (naxis != 1 && naxis != 2) {
+        fprintf(stderr, "Error: Mask FITS file must have 1 or 2 dimensions (X, Y)\n");
         exit(1);
     }
-    if (fits_get_img_size(fptr, 2, naxes, &status)) CHECK_STATUS(status);
+    if (fits_get_img_size(fptr, naxis, naxes, &status)) CHECK_STATUS(status);
 
     *width = naxes[0];
-    *height = naxes[1];
+    *height = (naxis == 2) ? naxes[1] : 1;
 
     size_t data_size = (*width) * (*height);
     double *mask = (double*) malloc(data_size * sizeof(double));
@@ -100,18 +101,34 @@ void read_frame_data(const char *stream_name, FrameInfo *frame, int expected_pix
         return;
     }
 
+    int naxis;
+    long naxes[3];
+    if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
+    if (fits_get_img_size(fptr, naxis, naxes, &status)) CHECK_STATUS(status);
+
     if (width_chk && height_chk) {
-        int naxis;
-        long naxes[3];
-        if (fits_get_img_dim(fptr, &naxis, &status) == 0 && fits_get_img_size(fptr, 3, naxes, &status) == 0) {
-             if (naxes[0] != *width_chk || naxes[1] != *height_chk) {
-                 fprintf(stderr, "Error: Dimension mismatch in %s\n", filepath);
-                 exit(1);
-             }
+        // If file is 2D: naxes[0]=W, naxes[1]=Time. Implicit H=1.
+        // If file is 3D: naxes[0]=W, naxes[1]=H, naxes[2]=Time.
+        long file_w = naxes[0];
+        long file_h = (naxis == 3) ? naxes[1] : 1;
+
+        if (file_w != *width_chk || file_h != *height_chk) {
+             fprintf(stderr, "Error: Dimension mismatch in %s. Expected %dx%d, found %ldx%ld\n",
+                     filepath, *width_chk, *height_chk, file_w, file_h);
+             exit(1);
         }
     }
 
-    long fpixel[3] = {1, 1, frame->local_cube_idx + 1};
+    long fpixel[3];
+    if (naxis == 3) {
+        fpixel[0] = 1;
+        fpixel[1] = 1;
+        fpixel[2] = frame->local_cube_idx + 1;
+    } else {
+        fpixel[0] = 1;
+        fpixel[1] = frame->local_cube_idx + 1;
+    }
+
     if (fits_read_pix(fptr, TDOUBLE, fpixel, expected_pixels, NULL, buffer, NULL, &status)) {
         fits_report_error(stderr, status);
     }
@@ -334,10 +351,19 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
 
             if (fits_open_file(&fptr, first_fits, READONLY, &status)) CHECK_STATUS(status);
             if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
-            if (fits_get_img_size(fptr, 3, naxes, &status)) CHECK_STATUS(status);
+            if (fits_get_img_size(fptr, naxis, naxes, &status)) CHECK_STATUS(status);
 
-            width = naxes[0];
-            height = naxes[1];
+            if (naxis == 3) {
+                width = naxes[0];
+                height = naxes[1];
+            } else if (naxis == 2) {
+                width = naxes[0];
+                height = 1;
+            } else {
+                fprintf(stderr, "Error: Unexpected dimensions in %s (%d)\n", first_fits, naxis);
+                exit(1);
+            }
+
             fits_close_file(fptr, &status); CHECK_STATUS(status);
 
             printf("Created default mask %d x %d\n", width, height);
@@ -465,7 +491,22 @@ DiffResult* process_stream(const char *stream_name, double start_time, double en
                      fits_open_file(&fptr, filepath, READONLY, &status);
                      strcpy(current_file, filepath);
                  }
-                 long fpixel[3] = {1, 1, frames[i].local_cube_idx + 1};
+
+                 // Get fpixel based on file dim
+                 // Wait, we need to know if file is 2D or 3D to set fpixel correctly.
+                 // We don't check file dims here (cached in width/height), but we can query naxis.
+                 // Let's assume consistent within stream or query.
+                 // Simplest: query naxis.
+                 int naxis;
+                 if (fits_get_img_dim(fptr, &naxis, &status)) CHECK_STATUS(status);
+
+                 long fpixel[3];
+                 if (naxis == 3) {
+                     fpixel[0] = 1; fpixel[1] = 1; fpixel[2] = frames[i].local_cube_idx + 1;
+                 } else {
+                     fpixel[0] = 1; fpixel[1] = frames[i].local_cube_idx + 1;
+                 }
+
                  fits_read_pix(fptr, TDOUBLE, fpixel, n_pixels, NULL, frame_buf, NULL, &status);
                  for(int k=0; k<n_valid; k++) out_data[(size_t)i * n_valid + k] = frame_buf[valid_indices[k]] * mask[valid_indices[k]];
              }
@@ -571,14 +612,6 @@ int main(int argc, char *argv[]) {
             FILE *f = fopen(outfile, "w");
 
             // Loop over pairs in A
-            // resA->times has N_pairs elements.
-            // pair_idx = i*(2N - 1 - i)/2 + (j - i - 1)
-            // But we just iterated flatly.
-            // How do we match "Line N" and "Line N+ndt"?
-            // We assume the user implies "Line N of the FILE", which matches "pair N of the stored list".
-            // Since both files are generated by the same logic (all unique pairs, sorted by i then j),
-            // matching Line N to Line N+ndt matches the N-th pair of A to the (N+ndt)-th pair of B.
-
             long N_pairs_A = resA->n_pairs;
             long N_pairs_B = resB->n_pairs;
 
